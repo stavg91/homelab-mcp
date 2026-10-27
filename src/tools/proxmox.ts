@@ -197,6 +197,12 @@ export async function getProxmoxHostStatus(): Promise<ProxmoxHostSummary | null>
   // PVE 9 returns structured objects (memory/swap/ksm, loadavg array).
   const memUsed = status.mem ?? status.memory?.used ?? 0;
   const memTotal = status.maxmem ?? status.memory?.total ?? 0;
+  // A real node always reports memory; 0 total means the API format changed
+  // again. Fail loudly so the caller reports proxmox_host: null instead of
+  // silently looking like "0 GB used / 0%".
+  if (memTotal <= 0) {
+    throw new Error('Node status returned no memory fields (unexpected Proxmox API format)');
+  }
   const loadavg = Array.isArray(status.loadavg)
     ? status.loadavg.join(' ')
     : status.loadavg !== undefined
