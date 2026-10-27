@@ -63,6 +63,87 @@ export interface SystemInfo {
   disk_used_gb: number;
   disk_total_gb: number;
   disk_percent: number;
+  scope: 'local';
+  proxmox_host: ProxmoxHostSummary | null;
+}
+
+export interface ProxmoxHostSummary {
+  node: string;
+  cpu_percent: number;
+  memory_used_gb: number;
+  memory_total_gb: number;
+  memory_percent: number;
+  uptime: string;
+  loadavg?: string;
+  ksm_shared_gb?: number;
+  swap_used_gb?: number;
+}
+
+export interface DriveHealth {
+  device: string;
+  model?: string;
+  serial?: string;
+  capacity_bytes?: number;
+  smart_status?: string;
+  temperature_c?: number;
+  wear_percent_used?: number;
+  error_counters?: {
+    current_pending_sector: number;
+    reallocated_sector_ct: number;
+    reallocated_event_count: number;
+    offline_uncorrectable: number;
+    udma_crc_error_count: number;
+  };
+  error?: string;
+}
+
+export interface DiskHealthReport {
+  drives: DriveHealth[];
+  error?: string;
+  devices?: string[];
+}
+
+export interface TemperatureReading {
+  label: string;
+  current_c: number;
+  high_c?: number;
+  crit_c?: number;
+}
+
+export interface ChipTemperatures {
+  name: string;
+  adapter: string;
+  readings: TemperatureReading[];
+}
+
+export interface TemperaturesReport {
+  chips: ChipTemperatures[];
+  error?: string;
+}
+
+export interface BackupLatestInfo {
+  volid: string;
+  size_gb: number;
+  backup_time: string;
+  age: string;
+}
+
+export interface BackupGuestStatus {
+  vmid: number;
+  name: string;
+  node: string;
+  type: 'qemu' | 'lxc';
+  backups_kept: number;
+  last_backup: BackupLatestInfo | null;
+}
+
+export interface ProxmoxBackupReport {
+  guests: BackupGuestStatus[];
+  summary: {
+    backed_up_24h: number;
+    backed_up_older: number;
+    never_backed_up: number;
+  };
 }
 
 export interface OPNsenseStatus {
@@ -138,6 +219,7 @@ export interface ProxmoxVM {
   cpu_percent?: number;
   memory_percent?: number;
   uptime?: string;
+  ips?: string[];
 }
 
 export interface ProxmoxVMConfig {

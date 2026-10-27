@@ -1,5 +1,14 @@
 import https from 'https';
-import { Config, ProxmoxStatus, ProxmoxVM, ProxmoxVMConfig, ProxmoxStorage, OperationResult } from '../types.js';
+import {
+  Config,
+  ProxmoxStatus,
+  ProxmoxVM,
+  ProxmoxVMConfig,
+  ProxmoxStorage,
+  ProxmoxHostSummary,
+  ProxmoxBackupReport,
+  OperationResult,
+} from '../types.js';
 
 let config: Config;
 
@@ -96,7 +105,7 @@ export async function getProxmoxStatus(): Promise<ProxmoxStatus> {
   }
 }
 
-export async function listProxmoxVMs(): Promise<{ vms: ProxmoxVM[] }> {
+export async function listProxmoxVMs(includeIps: boolean = false): Promise<{ vms: ProxmoxVM[] }> {
   try {
     // Get all nodes first
     const nodes = await proxmoxRequest('/nodes');
@@ -106,12 +115,13 @@ export async function listProxmoxVMs(): Promise<{ vms: ProxmoxVM[] }> {
     // For each node, get both QEMU VMs and LXC containers
     for (const node of nodes) {
       const nodeName = node.node;
+      const nodeVMs: ProxmoxVM[] = [];
 
       // Get QEMU VMs
       try {
         const qemuVMs = await proxmoxRequest(`/nodes/${nodeName}/qemu`);
         for (const vm of qemuVMs) {
-          allVMs.push({
+          nodeVMs.push({
             vmid: vm.vmid,
             name: vm.name || `VM ${vm.vmid}`,
             node: nodeName,
@@ -130,7 +140,7 @@ export async function listProxmoxVMs(): Promise<{ vms: ProxmoxVM[] }> {
       try {
         const lxcContainers = await proxmoxRequest(`/nodes/${nodeName}/lxc`);
         for (const ct of lxcContainers) {
-          allVMs.push({
+          nodeVMs.push({
             vmid: ct.vmid,
             name: ct.name || `CT ${ct.vmid}`,
             node: nodeName,
@@ -144,12 +154,153 @@ export async function listProxmoxVMs(): Promise<{ vms: ProxmoxVM[] }> {
       } catch (e) {
         console.error(`[Proxmox] Could not fetch LXC containers for node ${nodeName}:`, (e as Error).message);
       }
+
+      // Optionally enrich running guests with their IP addresses.
+      // Fire all per-VM requests for this node in parallel instead of sequentially.
+      if (includeIps) {
+        await Promise.all(nodeVMs.map(async (vm) => {
+          if (vm.status !== 'running') return;
+          try {
+            vm.ips = vm.type === 'qemu'
+              ? await getQemuGuestIPs(nodeName, vm.vmid)
+              : await getLxcGuestIPs(nodeName, vm.vmid);
+          } catch {
+            // Guest agent not installed / not responding (e.g. 501) - silently report none
+            vm.ips = [];
+          }
+        }));
+      }
+
+      allVMs.push(...nodeVMs);
     }
 
     return { vms: allVMs };
   } catch (error) {
     throw new Error(`Failed to list Proxmox VMs: ${(error as Error).message}`);
   }
+}
+
+export async function getProxmoxHostStatus(): Promise<ProxmoxHostSummary | null> {
+  if (!config.proxmoxHost || !config.proxmoxTokenId || !config.proxmoxTokenSecret) {
+    return null;
+  }
+
+  const nodes = await proxmoxRequest('/nodes');
+  const online = (nodes as any[]).find((n) => n.status === 'online');
+  if (!online) {
+    throw new Error('No online Proxmox nodes found');
+  }
+
+  const status = await proxmoxRequest(`/nodes/${online.node}/status`);
+
+  // PVE <=8 uses flat fields (mem/maxmem/ksm/swapused, loadavg string);
+  // PVE 9 returns structured objects (memory/swap/ksm, loadavg array).
+  const memUsed = status.mem ?? status.memory?.used ?? 0;
+  const memTotal = status.maxmem ?? status.memory?.total ?? 0;
+  const loadavg = Array.isArray(status.loadavg)
+    ? status.loadavg.join(' ')
+    : status.loadavg !== undefined
+      ? String(status.loadavg).trim()
+      : undefined;
+
+  const summary: ProxmoxHostSummary = {
+    node: status.node || online.node,
+    cpu_percent: parseFloat(((status.cpu || 0) * 100).toFixed(2)),
+    memory_used_gb: parseFloat((memUsed / (1024 ** 3)).toFixed(2)),
+    memory_total_gb: parseFloat((memTotal / (1024 ** 3)).toFixed(2)),
+    memory_percent: parseFloat((memTotal > 0 ? (memUsed / memTotal) * 100 : 0).toFixed(2)),
+    uptime: formatUptime(status.uptime || 0),
+    loadavg,
+  };
+
+  const ksm = status.ksm && typeof status.ksm === 'object' ? status.ksm.shared : status.ksm;
+  if (ksm !== undefined && ksm !== null) {
+    summary.ksm_shared_gb = parseFloat((ksm / (1024 ** 3)).toFixed(2));
+  }
+  const swapUsed = status.swapused ?? (status.swap && typeof status.swap === 'object' ? status.swap.used : undefined);
+  if (swapUsed !== undefined && swapUsed !== null) {
+    summary.swap_used_gb = parseFloat((swapUsed / (1024 ** 3)).toFixed(2));
+  }
+
+  return summary;
+}
+
+export async function getProxmoxBackupStatus(): Promise<ProxmoxBackupReport> {
+  const nodes = await proxmoxRequest('/nodes');
+
+  // Collect backup entries from all active backup-capable storages (incl. PBS), grouped by vmid
+  const backupsByVmid = new Map<number, any[]>();
+
+  for (const node of nodes) {
+    const nodeName = node.node;
+    let storages: any[] = [];
+    try {
+      storages = await proxmoxRequest(`/nodes/${nodeName}/storage`);
+    } catch (e) {
+      console.error(`[Proxmox] Could not fetch storage for node ${nodeName}:`, (e as Error).message);
+      continue;
+    }
+
+    const backupStores = storages.filter(
+      (s) => (s.content || '').includes('backup') && s.active === 1
+    );
+
+    for (const store of backupStores) {
+      try {
+        const entries = await proxmoxRequest(
+          `/nodes/${nodeName}/storage/${store.storage}/content?content=backup`
+        );
+        for (const entry of entries) {
+          const vmid = typeof entry.vmid === 'number' ? entry.vmid : vmidFromVolid(entry.volid);
+          if (vmid === null) continue;
+          if (!backupsByVmid.has(vmid)) backupsByVmid.set(vmid, []);
+          backupsByVmid.get(vmid)!.push(entry);
+        }
+      } catch (e) {
+        console.error(`[Proxmox] Could not list backup content of ${store.storage}:`, (e as Error).message);
+      }
+    }
+  }
+
+  // Cross-reference the full guest list so unbacked guests show up too
+  const { vms } = await listProxmoxVMs();
+  const now = Date.now();
+
+  const guests: ProxmoxBackupReport['guests'] = vms.map((vm) => {
+    const entries = (backupsByVmid.get(vm.vmid) || [])
+      .slice()
+      .sort((a, b) => backupTime(b) - backupTime(a));
+    const latest = entries[0];
+
+    return {
+      vmid: vm.vmid,
+      name: vm.name,
+      node: vm.node,
+      type: vm.type,
+      backups_kept: entries.length,
+      last_backup: latest
+        ? {
+            volid: latest.volid,
+            size_gb: parseFloat(((latest.size || 0) / (1024 ** 3)).toFixed(2)),
+            backup_time: new Date(backupTime(latest) * 1000).toISOString(),
+            age: formatAge(now - backupTime(latest) * 1000),
+          }
+        : null,
+    };
+  });
+
+  const backedUp24h = guests.filter(
+    (g) => g.last_backup && now - Date.parse(g.last_backup.backup_time) < 24 * 3600 * 1000
+  ).length;
+
+  return {
+    guests,
+    summary: {
+      backed_up_24h: backedUp24h,
+      backed_up_older: guests.filter((g) => g.last_backup).length - backedUp24h,
+      never_backed_up: guests.filter((g) => !g.last_backup).length,
+    },
+  };
 }
 
 export async function getProxmoxVMStatus(node: string, vmid: number, type: 'qemu' | 'lxc'): Promise<ProxmoxVM> {
@@ -414,4 +565,65 @@ function formatUptime(seconds: number): string {
   } else {
     return `${minutes}m`;
   }
+}
+
+function formatAge(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  } else if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
+function vmidFromVolid(volid: string): number | null {
+  if (!volid) return null;
+  // e.g. "pbs:backup/vm/101/2026-10-26T02:00:00Z", "pbs:backup/ct/101/..." or "local:backup/vm/dump/vzdump-lxc-101-..."
+  const match = volid.match(/\/(?:vm|ct)\/(\d+)\//) || volid.match(/vzdump-(?:qemu|lxc)-(\d+)-/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+function backupTime(entry: any): number {
+  // PVE storage content entries expose `ctime`; older builds use `backup-time`
+  return entry['backup-time'] ?? entry.ctime ?? 0;
+}
+
+async function getQemuGuestIPs(node: string, vmid: number): Promise<string[]> {
+  const res = await proxmoxRequest(`/nodes/${node}/qemu/${vmid}/agent/interfaces`);
+  const interfaces = Array.isArray(res) ? res : res?.result ?? [];
+
+  const ips: string[] = [];
+  for (const iface of interfaces) {
+    for (const addr of iface['ip-addresses'] || []) {
+      const ip = addr['ip-address'];
+      if (ip && ip !== '127.0.0.1' && ip !== '::1' && !ip.startsWith('fe80::')) {
+        ips.push(ip);
+      }
+    }
+  }
+  return [...new Set(ips)];
+}
+
+async function getLxcGuestIPs(node: string, vmid: number): Promise<string[]> {
+  const interfaces = await proxmoxRequest(`/nodes/${node}/lxc/${vmid}/interfaces`);
+
+  const ips: string[] = [];
+  for (const iface of Array.isArray(interfaces) ? interfaces : []) {
+    for (const key of ['inet', 'inet6']) {
+      const raw = iface[key];
+      const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      for (const value of list) {
+        if (typeof value !== 'string') continue;
+        const ip = value.split('/')[0].trim();
+        if (!ip || ip === '127.0.0.1' || ip === '::1' || ip.startsWith('fe80::')) continue;
+        ips.push(ip);
+      }
+    }
+  }
+  return [...new Set(ips)];
 }

@@ -252,12 +252,15 @@ curl https://mcp.example.com/mcp \
 - `docker_list_containers` - List all containers
 - `docker_container_logs` - Get container logs
 - `docker_container_stats` - Get container CPU/memory stats
-- `system_info` - Get host system info
+- `system_info` - Get local container system info (disk, memory, CPU) plus Proxmox host node metrics
+- `system_disk_health` - Get SMART health for all physical disks (status, temperature, wear, error counters)
+- `system_temperatures` - Get temperature readings from all sensor chips (CPU cores, NVMe, chipset)
 - `opnsense_status` - Get OPNsense status
 - `truenas_status` - Get TrueNAS pool status
 - `truenas_alerts` - Get TrueNAS alerts
 - `proxmox_status` - Get Proxmox cluster status
-- `proxmox_list_vms` - List all VMs and containers
+- `proxmox_backup_status` - Backup coverage per guest: latest backup age/size, retention, guests never backed up
+- `proxmox_list_vms` - List all VMs and containers (optional `include_ips` for running guests)
 - `proxmox_vm_status` - Get VM/container status
 - `home_assistant_status` - Get Home Assistant version and entity counts
 - `home_assistant_list_entities` - List all entities (lights, switches, sensors)

@@ -82,12 +82,30 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'system_info',
-    description: 'Get host system information (disk, memory, CPU usage)',
+    description: 'Get system information for both the local container (disk, memory, CPU) and the Proxmox host node (CPU, memory, uptime, load) when Proxmox is configured',
     level: 1,
     inputSchema: {
       type: 'object',
     },
     handler: async () => system.getSystemInfo(),
+  },
+  {
+    name: 'system_disk_health',
+    description: 'Get SMART health for all physical disks (model, capacity, status, temperature, wear, error counters)',
+    level: 1,
+    inputSchema: {
+      type: 'object',
+    },
+    handler: async () => system.getDiskHealth(),
+  },
+  {
+    name: 'system_temperatures',
+    description: 'Get temperature readings from all sensor chips (CPU cores, NVMe, chipset)',
+    level: 1,
+    inputSchema: {
+      type: 'object',
+    },
+    handler: async () => system.getTemperatures(),
   },
   {
     name: 'opnsense_status',
@@ -126,13 +144,28 @@ const ALL_TOOLS: ToolDefinition[] = [
     handler: async () => proxmox.getProxmoxStatus(),
   },
   {
-    name: 'proxmox_list_vms',
-    description: 'List all Proxmox VMs and containers across all nodes',
+    name: 'proxmox_backup_status',
+    description: 'Report backup coverage for every Proxmox guest: latest backup time/age, size, retention count, and guests never backed up',
     level: 1,
     inputSchema: {
       type: 'object',
     },
-    handler: async () => proxmox.listProxmoxVMs(),
+    handler: async () => proxmox.getProxmoxBackupStatus(),
+  },
+  {
+    name: 'proxmox_list_vms',
+    description: 'List all Proxmox VMs and containers across all nodes; optionally include IP addresses of running guests (slower)',
+    level: 1,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_ips: {
+          type: 'boolean',
+          description: 'Also fetch IP addresses for running guests (default: false)',
+        },
+      },
+    },
+    handler: async (args) => proxmox.listProxmoxVMs(args.include_ips ?? false),
   },
   {
     name: 'proxmox_vm_status',
